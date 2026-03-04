@@ -108,7 +108,7 @@ install_docker() {
 install_tools() {
   log "Ставлю утилиты (curl/jq)..."
   apt update -y
-  apt install -y curl ca-certificates jq
+  apt install -y curl ca-certificates jq zip
 }
 
 run_wg_easy() {
@@ -288,8 +288,12 @@ for ((i=1;i<=COUNT;i++)); do
     echo "[!] не удалось скачать конфиг для $NAME (id=$ID). Возможно другой endpoint в твоей версии."
   fi
 done
+ZIP_NAME="${COUNTRY}_${WG_HOST//./_}.zip"
+cd /root/wg-configs
+zip -r "$ZIP_NAME" "${COUNTRY}_${WG_HOST//./_}" >/dev/null
 
 log "Готово.
 Папка конфигов: $OUTDIR
 WG UI: http://${WG_HOST}:51821
+ZIP готов: /root/wg-configs/$ZIP_NAME
 "
