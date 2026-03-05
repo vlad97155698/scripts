@@ -33,6 +33,8 @@ COUNTRY=""
 WG_HOST="auto"
 WG_IMAGE="$WG_IMAGE_DEFAULT"
 NO_CLIENTS=0
+ADD=0
+MAKE_ZIP=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,6 +44,8 @@ while [[ $# -gt 0 ]]; do
     --host) WG_HOST="${2:-auto}"; shift 2;;
     --image) WG_IMAGE="${2:-$WG_IMAGE_DEFAULT}"; shift 2;;
     --no-clients) NO_CLIENTS=1; shift 1;;
+    --add) ADD="${2:-0}"; shift 2;;
+    --zip) MAKE_ZIP=1; shift 1;;
     -h|--help) usage; exit 0;;
     *) echo "Неизвестный параметр: $1"; usage; exit 1;;
   esac
@@ -207,6 +211,40 @@ download_client_config() {
   return 1
 }
 
+wg_easy_exists() {
+  docker ps --format '{{.Names}}' | grep -qx 'wg-easy'
+}
+
+get_next_index() {
+  local jar="$1"
+  local prefix="$2"   # например RU_91_142_72_112-
+  local json max
+
+  json="$(api_list_clients "$jar")"
+  echo "$json" | jq -e . >/dev/null 2>&1 || { echo 1; return; }
+
+  # вытащим номера из имён вида PREFIX + число
+  max="$(echo "$json" | jq -r --arg p "$prefix" '
+      [.[] | select(.name|startswith($p)) | .name] 
+      | map(sub("^" + ($p|gsub("\\."; "\\\\.")) ; "")) 
+      | map(try tonumber catch empty)
+      | max // 0
+    ' 2>/dev/null || echo 0)"
+
+  if [[ -z "$max" || "$max" == "null" ]]; then
+    max=0
+  fi
+
+  echo $((max + 1))
+}
+
+make_zip() {
+  local zip_name="$1"
+  local folder_name="$2"
+  cd /root/wg-configs
+  zip -r "$zip_name" "$folder_name" >/dev/null
+}
+
 # ===== Выполнение =====
 need_root
 install_tools
@@ -235,6 +273,65 @@ log "Параметры:
   COUNT    = $COUNT
   IMAGE    = $WG_IMAGE
 "
+
+# Если попросили догенерировать (ADD>0) — не переустанавливаем wg-easy
+if [[ "$ADD" -gt 0 ]]; then
+  if ! wg_easy_exists; then
+    echo "wg-easy не запущен (контейнер wg-easy не найден). Запусти установку без --add."
+    exit 1
+  fi
+
+  wait_ui
+
+  JAR="/tmp/wg-easy.cookie"
+  api_login_cookie "$JAR"
+
+  OUTDIR="/root/wg-configs/${COUNTRY}_${WG_HOST//./_}"
+  mkdir -p "$OUTDIR"
+
+  PREFIX="${COUNTRY}_${WG_HOST//./_}-"
+  START="$(get_next_index "$JAR" "$PREFIX")"
+  END=$((START + ADD - 1))
+
+  log "Догенерация клиентов: добавляю $ADD шт.
+  Диапазон: ${START}..${END}
+  Папка: $OUTDIR
+  "
+
+  for ((i=START;i<=END;i++)); do
+    NAME="${PREFIX}${i}"
+    echo "[+] create: $NAME"
+    api_create_client "$JAR" "$NAME" || {
+      echo "Не получилось создать клиента через API."
+      exit 1
+    }
+  done
+
+  JSON="$(api_list_clients "$JAR")"
+
+  for ((i=START;i<=END;i++)); do
+    NAME="${PREFIX}${i}"
+    ID="$(echo "$JSON" | jq -r --arg n "$NAME" '.[] | select(.name==$n) | .id' | head -n1)"
+    [[ -z "$ID" || "$ID" == "null" ]] && { echo "[!] нет id для $NAME"; continue; }
+
+    OUTFILE="${OUTDIR}/${NAME}.conf"
+    if download_client_config "$JAR" "$ID" "$OUTFILE"; then
+      echo "[✓] saved: $OUTFILE"
+    else
+      echo "[!] не удалось скачать конфиг для $NAME (id=$ID)"
+    fi
+  done
+
+  ZIP_NAME="${COUNTRY}_${WG_HOST//./_}.zip"
+  make_zip "$ZIP_NAME" "${COUNTRY}_${WG_HOST//./_}"
+
+  log "Готово (добавление).
+  Папка конфигов: $OUTDIR
+  ZIP готов: /root/wg-configs/$ZIP_NAME
+  WG UI: http://${WG_HOST}:51821
+  "
+  exit 0
+fi
 
 run_wg_easy
 wait_ui
