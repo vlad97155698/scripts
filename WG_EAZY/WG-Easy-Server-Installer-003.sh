@@ -108,6 +108,25 @@ get_country_code() {
   echo "$cc"
 }
 
+get_next_index() {
+  local jar="$1"
+  local json
+  local max=0
+
+  json="$(api_list_clients "$jar")"
+
+  for name in $(echo "$json" | jq -r '.[].name'); do
+    num="${name##*-}"
+    if [[ "$num" =~ ^[0-9]+$ ]]; then
+      if (( num > max )); then
+        max=$num
+      fi
+    fi
+  done
+
+  echo $((max + 1))
+}
+
 install_docker() {
   if command -v docker >/dev/null 2>&1; then
     log "Docker уже установлен: $(docker --version)"
@@ -123,9 +142,22 @@ install_docker() {
 }
 
 install_tools() {
-  log "Ставлю утилиты (curl/jq/zip)..."
+  log "Проверяю утилиты..."
+
+  need_install=()
+
+  command -v curl >/dev/null 2>&1 || need_install+=("curl")
+  command -v jq >/dev/null 2>&1 || need_install+=("jq")
+  command -v zip >/dev/null 2>&1 || need_install+=("zip")
+
+  if [ ${#need_install[@]} -eq 0 ]; then
+    log "Все утилиты уже установлены."
+    return
+  fi
+
+  log "Ставлю: ${need_install[*]}"
   apt update -y
-  apt install -y curl ca-certificates jq zip
+  apt install -y "${need_install[@]}"
 }
 
 wipe_wg_easy_data() {
@@ -261,8 +293,13 @@ create_clients_and_download() {
 
   log "Создаю $COUNT клиентов и скачиваю конфиги..."
 
-  for ((i=1;i<=COUNT;i++)); do
+  START_INDEX=$(get_next_index "$jar")
+
+  for ((i=0;i<COUNT;i++)); do
     local name
+    IDX=$((START_INDEX + i))
+    name="${COUNTRY}_${WG_HOST//./_}-${IDX}"
+
     name="${COUNTRY}_${WG_HOST//./_}-${i}"
     echo "[+] create: $name"
     api_create_client "$jar" "$name" || {
