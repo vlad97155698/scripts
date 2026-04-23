@@ -16,7 +16,7 @@ usage() {
   bash master.sh --password 'Qwerty123!' --count 30 --country RU
   bash master.sh --password 'Qwerty123!' --count 10
   bash master.sh --password 'Qwerty123!' --no-clients
-  bash master.sh --password 'Qwerty123!' --country RU --refresh-endpoints --count 3
+  bash master.sh --password 'Qwerty123!' --country PL --refresh-endpoints --count 3
 
 Параметры:
   --password           Пароль для web-панели wg-easy (обязательно)
@@ -25,7 +25,7 @@ usage() {
   --host               WG_HOST (auto или конкретный IP/домен). По умолчанию auto
   --image              Docker image wg-easy (по умолчанию weejewel/wg-easy:latest)
   --no-clients         Не создавать клиентов (равносильно --count 0)
-  --refresh-endpoints  Удалить старых клиентов, создать новых и перескачать конфиги под новый WG_HOST
+  --refresh-endpoints  Полный сброс wg-easy и создание новых клиентов под новый WG_HOST
 EOF
 }
 
@@ -128,6 +128,13 @@ install_tools() {
   apt install -y curl ca-certificates jq zip
 }
 
+wipe_wg_easy_data() {
+  log "Полностью очищаю данные wg-easy..."
+  docker rm -f wg-easy >/dev/null 2>&1 || true
+  rm -rf /root/.wg-easy
+  mkdir -p /root/.wg-easy
+}
+
 run_wg_easy() {
   local udp_port="$WG_PORT_UDP_DEFAULT"
   local ui_port="$WG_PORT_UI_DEFAULT"
@@ -175,8 +182,15 @@ recreate_wg_easy_if_needed() {
   local old_host=""
   old_host="$(get_saved_host)"
 
-  if [[ "$REFRESH_ENDPOINTS" == "1" || -z "$old_host" || "$old_host" != "$WG_HOST" ]]; then
-    log "WG_HOST изменился или запрошено обновление endpoint'ов.
+  if [[ "$REFRESH_ENDPOINTS" == "1" ]]; then
+    log "Запрошен полный refresh endpoint'ов.
+  Старый WG_HOST: ${old_host:-<empty>}
+  Новый WG_HOST:  $WG_HOST"
+    return
+  fi
+
+  if [[ -z "$old_host" || "$old_host" != "$WG_HOST" ]]; then
+    log "WG_HOST изменился.
   Старый: ${old_host:-<empty>}
   Новый:  $WG_HOST"
     run_wg_easy
@@ -199,7 +213,7 @@ api_login_cookie() {
   curl -fsS -c "$jar" -b "$jar" \
     -H "Content-Type: application/json" \
     -X POST "http://127.0.0.1:51821/api/session" \
-    -d "{\"password\":\"$PASSWORD\"}" >/dev/null 2>&1 || true
+    -d "{\"password\":\"$PASSWORD\"}" >/dev/null
 }
 
 api_create_client() {
@@ -216,14 +230,6 @@ api_list_clients() {
   local jar="$1"
   curl -fsS -c "$jar" -b "$jar" \
     "http://127.0.0.1:51821/api/wireguard/client"
-}
-
-api_delete_client() {
-  local jar="$1"
-  local id="$2"
-
-  curl -fsS -c "$jar" -b "$jar" \
-    -X DELETE "http://127.0.0.1:51821/api/wireguard/client/${id}" >/dev/null
 }
 
 download_client_config() {
@@ -244,35 +250,6 @@ download_client_config() {
   done
 
   return 1
-}
-
-delete_all_clients() {
-  local jar="$1"
-  local json=""
-
-  json="$(api_list_clients "$jar")"
-  echo "$json" | jq -e . >/dev/null 2>&1 || {
-    echo "API вернул не-JSON при получении списка клиентов."
-    exit 1
-  }
-
-  while IFS= read -r row; do
-    _jq() {
-      echo "$row" | base64 -d | jq -r "$1"
-    }
-
-    local id name
-    id="$(_jq '.id')"
-    name="$(_jq '.name')"
-
-    [[ -z "$id" || "$id" == "null" ]] && continue
-
-    echo "[-] delete: ${name:-unknown} (id=$id)"
-    api_delete_client "$jar" "$id" || {
-      echo "[!] не удалось удалить клиента ${name:-unknown} (id=$id)"
-      exit 1
-    }
-  done < <(echo "$json" | jq -r '.[] | @base64')
 }
 
 create_clients_and_download() {
@@ -365,7 +342,35 @@ log "Параметры:
 
 recreate_wg_easy_if_needed
 
-if [[ "$COUNT" -le 0 && "$REFRESH_ENDPOINTS" -eq 0 ]]; then
+if [[ "$REFRESH_ENDPOINTS" == "1" ]]; then
+  if [[ "$COUNT" -le 0 ]]; then
+    echo "Для --refresh-endpoints нужно указать --count > 0"
+    exit 1
+  fi
+
+  wipe_wg_easy_data
+  run_wg_easy
+  wait_ui
+  save_host
+
+  JAR="/tmp/wg-easy.cookie"
+  api_login_cookie "$JAR"
+
+  OUTDIR="/root/wg-configs/${COUNTRY}_${WG_HOST//./_}"
+  ZIP_NAME="${COUNTRY}_${WG_HOST//./_}.zip"
+
+  create_clients_and_download "$JAR" "$OUTDIR"
+  make_zip "$OUTDIR" "$ZIP_NAME"
+
+  log "Endpoint'ы обновлены: старые клиенты полностью удалены, новые созданы.
+Папка конфигов: $OUTDIR
+WG UI: http://${WG_HOST}:51821
+ZIP готов: /root/wg-configs/$ZIP_NAME
+"
+  exit 0
+fi
+
+if [[ "$COUNT" -le 0 ]]; then
   log "Генерация клиентов выключена (COUNT=0). Готово."
   echo "WG UI: http://${WG_HOST}:51821"
   exit 0
@@ -377,34 +382,10 @@ api_login_cookie "$JAR"
 OUTDIR="/root/wg-configs/${COUNTRY}_${WG_HOST//./_}"
 ZIP_NAME="${COUNTRY}_${WG_HOST//./_}.zip"
 
-if [[ "$REFRESH_ENDPOINTS" == "1" ]]; then
-  if [[ "$COUNT" -le 0 ]]; then
-    echo "Для --refresh-endpoints нужно указать --count > 0"
-    exit 1
-  fi
-
-  log "Удаляю всех старых клиентов из wg-easy..."
-  delete_all_clients "$JAR"
-
-  create_clients_and_download "$JAR" "$OUTDIR"
-  make_zip "$OUTDIR" "$ZIP_NAME"
-
-  log "Endpoint'ы обновлены: старые клиенты удалены, новые созданы.
-Папка конфигов: $OUTDIR
-WG UI: http://${WG_HOST}:51821
-ZIP готов: /root/wg-configs/$ZIP_NAME
-"
-  exit 0
-fi
-
-if [[ "$COUNT" -le 0 ]]; then
-  log "COUNT=0, новых клиентов создавать не нужно."
-  echo "WG UI: http://${WG_HOST}:51821"
-  exit 0
-fi
-
 create_clients_and_download "$JAR" "$OUTDIR"
 make_zip "$OUTDIR" "$ZIP_NAME"
+
+save_host
 
 log "Готово.
 Папка конфигов: $OUTDIR
