@@ -340,33 +340,6 @@ create_clients_and_download() {
   done
 }
 
-  local json
-  json="$(api_list_clients "$jar")"
-  echo "$json" | jq -e . >/dev/null 2>&1 || {
-    echo "API вернул не-JSON. Проверь авторизацию/версию wg-easy."
-    exit 1
-  }
-
-  for ((i=1;i<=COUNT;i++)); do
-    local name id outfile
-    name="${COUNTRY}_${WG_HOST//./_}-${i}"
-    id="$(echo "$json" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id' | head -n1)"
-
-    if [[ -z "$id" || "$id" == "null" ]]; then
-      echo "Не нашёл id для $name в списке клиентов."
-      exit 1
-    fi
-
-    outfile="${outdir}/${name}.conf"
-    if download_client_config "$jar" "$id" "$outfile"; then
-      echo "[✓] saved: $outfile"
-    else
-      echo "[!] не удалось скачать конфиг для $name (id=$id). Возможно другой endpoint в твоей версии."
-      exit 1
-    fi
-  done
-}
-
 make_zip() {
   local outdir="$1"
   local zip_name="$2"
