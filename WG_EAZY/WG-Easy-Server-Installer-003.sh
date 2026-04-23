@@ -112,17 +112,19 @@ get_next_index() {
   local jar="$1"
   local json
   local max=0
+  local name
+  local num
 
   json="$(api_list_clients "$jar")"
 
-  for name in $(echo "$json" | jq -r '.[].name'); do
+  while IFS= read -r name; do
     num="${name##*-}"
     if [[ "$num" =~ ^[0-9]+$ ]]; then
       if (( num > max )); then
         max=$num
       fi
     fi
-  done
+  done < <(echo "$json" | jq -r '.[].name')
 
   echo $((max + 1))
 }
@@ -293,14 +295,17 @@ create_clients_and_download() {
 
   log "Создаю $COUNT клиентов и скачиваю конфиги..."
 
-  START_INDEX=$(get_next_index "$jar")
+  local start_index
+  start_index="$(get_next_index "$jar")"
 
-  for ((i=0;i<COUNT;i++)); do
-    local name
-    IDX=$((START_INDEX + i))
-    name="${COUNTRY}_${WG_HOST//./_}-${IDX}"
+  local created_names=()
 
-    name="${COUNTRY}_${WG_HOST//./_}-${i}"
+  for ((i=0; i<COUNT; i++)); do
+    local idx name
+    idx=$((start_index + i))
+    name="${COUNTRY}_${WG_HOST//./_}-${idx}"
+    created_names+=("$name")
+
     echo "[+] create: $name"
     api_create_client "$jar" "$name" || {
       echo "Не получилось создать клиента через API. Проверь версию wg-easy / авторизацию."
@@ -308,6 +313,32 @@ create_clients_and_download() {
       exit 1
     }
   done
+
+  local json
+  json="$(api_list_clients "$jar")"
+  echo "$json" | jq -e . >/dev/null 2>&1 || {
+    echo "API вернул не-JSON. Проверь авторизацию/версию wg-easy."
+    exit 1
+  }
+
+  local name id outfile
+  for name in "${created_names[@]}"; do
+    id="$(echo "$json" | jq -r --arg n "$name" '.[] | select(.name==$n) | .id' | head -n1)"
+
+    if [[ -z "$id" || "$id" == "null" ]]; then
+      echo "Не нашёл id для $name в списке клиентов."
+      exit 1
+    fi
+
+    outfile="${outdir}/${name}.conf"
+    if download_client_config "$jar" "$id" "$outfile"; then
+      echo "[✓] saved: $outfile"
+    else
+      echo "[!] не удалось скачать конфиг для $name (id=$id). Возможно другой endpoint в твоей версии."
+      exit 1
+    fi
+  done
+}
 
   local json
   json="$(api_list_clients "$jar")"
